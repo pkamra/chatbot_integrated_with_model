@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+
+# A sample training component that trains a simple scikit-learn decision tree model.
+# This implementation works in File mode and makes no assumptions about the input file names.
+# Input is specified as CSV with a data point in each row and the labels in the first column.
+
+from __future__ import print_function
+
+import json
+import os
+import pickle
+import sys
+import traceback
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.metrics import accuracy_score, confusion_matrix
+from nltk.corpus import stopwords
+import re
+from bs4 import BeautifulSoup
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.model_selection import train_test_split
+import pandas as pd
+
+
+# These are the paths to where SageMaker mounts interesting things in your container.
+
+prefix = '/opt/ml/'
+
+input_path = prefix + 'input/data'
+output_path = os.path.join(prefix, 'output')
+model_path = os.path.join(prefix, 'model')
+param_path = os.path.join(prefix, 'input/config/hyperparameters.json')
+
+# This algorithm has a single channel of input data called 'training'. Since we run in
+# File mode, the input files are copied to the directory specified here.
+channel_name='training'
+training_path = os.path.join(input_path, channel_name)
+
+def print_plot(index):
+    example = df[df.index == index][['post', 'tags']].values[0]
+    if len(example) > 0:
+        print(example[0])
+        print('Tag:', example[1])
+
+def clean_text(text):
+    """
+        text: a string
+
+        return: modified initial string
+    """
+    text = BeautifulSoup(text, "lxml").text  # HTML decoding
+    text = text.lower()  # lowercase text
+    text = REPLACE_BY_SPACE_RE.sub(' ', text)  # replace REPLACE_BY_SPACE_RE symbols by space in text
+    text = BAD_SYMBOLS_RE.sub('', text)  # delete symbols which are in BAD_SYMBOLS_RE from text
+    # text = ' '.join(word for word in text.split() if word not in STOPWORDS)  # delete stopwors from text
+    return text
+
+# The function to execute the training.
+def train():
+    print('Starting the training.')
+    try:
+        # Read in any hyperparameters that the user passed with the training job
+        with open(param_path, 'r') as tc:
+            trainingParams = json.load(tc)
+
+        # Take the set of files and read them all into a single pandas dataframe
+        input_files = [ os.path.join(training_path, file) for file in os.listdir(training_path) ]
+        if len(input_files) == 0:
+            raise ValueError(('There are no files in {}.\n' +
+                              'This usually indicates that the channel ({}) was incorrectly specified,\n' +
+                              'the data specification in S3 was incorrectly specified or the role specified\n' +
+                              'does not have permission to access the data.').format(training_path, channel_name))
+        df = [ pd.read_csv(file) for file in input_files if file.endswith(".csv")]
+        
+        df = df[pd.notnull(df['tags'])]
+        df.head(10)
+
+        print(df['post'].apply(lambda x: len(x.split(' '))).sum())
+
+        my_tags = \
+            ['Close their Account','Fees','Functionality','Investment Advice','Sign-Up']
+
+        print_plot(10)
+
+        dont_remove = ['out','not','$','%']
+        REPLACE_BY_SPACE_RE = re.compile('[/(){}\[\]\|@,;]')
+        BAD_SYMBOLS_RE = re.compile('[^0-9a-z #+_]')
+        STOPWORDS = set(stopwords.words('english')).difference(dont_remove)
+
+        df['post'] = df['post'].apply(clean_text)
+
+        print_plot(10)
+
+        print(df['post'].apply(lambda x: len(x.split(' '))).sum())
+
+        X = df.post
+        y = df.tags
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state = 42)
+
+        #
+        # #Logistic regression
+        #
+        logreg = Pipeline([('vect', CountVectorizer()),
+                        ('tfidf', TfidfTransformer()),
+                        ('clf', LogisticRegression(n_jobs=1, C=1e5, max_iter=400)),
+                    ])
+        logreg.fit(X_train, y_train)
+
+        y_pred = logreg.predict(X_test)
+        #
+        print('accuracy %s' % accuracy_score(y_pred, y_test))
+        print(classification_report(y_test, y_pred,target_names=my_tags))
+        logregression_prediction = pd.concat([X_test,y_test], axis=1)
+        logregression_prediction['prediction0'] = y_pred
+        print("*****Data using Logistic Regression as classifier*******")
+        print(logregression_prediction)
+        # save the model
+        with open(os.path.join(model_path, 'logistic_regression_xcel.pkl'), 'wb') as out:
+            pickle.dump(logreg, out)
+        print('Training complete.')
+    except Exception as e:
+        # Write out an error file. This will be returned as the failureReason in the
+        # DescribeTrainingJob result.
+        trc = traceback.format_exc()
+        with open(os.path.join(output_path, 'failure'), 'w') as s:
+            s.write('Exception during training: ' + str(e) + '\n' + trc)
+        # Printing this causes the exception to be in the training job logs, as well.
+        print('Exception during training: ' + str(e) + '\n' + trc, file=sys.stderr)
+        # A non-zero exit code causes the training job to be marked as Failed.
+        sys.exit(255)
+
+if __name__ == '__main__':
+    train()
+
+    # A zero exit code causes the job to be marked a Succeeded.
+    sys.exit(0)
